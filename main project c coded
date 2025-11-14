@@ -1,0 +1,472 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#define MAX_REGISTERS 32
+#define MAX_LINE_LENGTH 100
+
+// Function prototypes
+void trim_whitespace(char* str);
+void write_output(FILE* dest_file, unsigned int machine_code, char output_type);
+int registers(char* reg);
+int sign_extend(int imm, int bits);
+void add_label(char* name, int address);
+int resolve_label(char* name);
+void parse_r_type_instruction(const char* instruction, char* rd, char* rs1, char* rs2);
+void parse_i_type_instruction(const char* instruction, char* rd, char* rs1, int* imm);
+void parse_ijlar_type_instruction(const char* instruction, char* rd, char* rs1, int* imm);
+void parse_s_b_type_instruction(const char* instruction, char* rs1, char* rs2, unsigned int* imm);
+void parse_u_j_type_instruction(const char* instruction, char* rd, int* imm);
+unsigned int assemble_r_type(const char* instruction, int funct3, int funct7, int opcode);
+unsigned int assemble_ijlar_type(const char* instruction, int funct3, int opcode);
+unsigned int assemble_i_type(const char* instruction, int funct3, int opcode);
+unsigned int assemble_ishift_type(const char* instruction, int funct3, int funct7, int opcode);
+unsigned int assemble_s_type(const char* instruction, int funct3, int opcode);
+unsigned int assemble_b_type(const char* instruction, int funct3, int opcode, int current_address);
+unsigned int assemble_u_type(const char* instruction, int opcode);
+unsigned int assemble_jal(const char* instruction, int opcode, int current_address);
+unsigned int assemble_instruction(const char* instruction, int current_address);
+
+
+int main(int argc, char* argv[]) {
+    if (argc != 4) {
+        printf("Usage: %s <source-file> <destination-file> <-h|-b>\n", argv[0]);
+        return 1;
+    }
+
+    char* source_file = argv[1];
+    char* destination_file = argv[2];
+    char output_type = argv[3][1]; // -h or -b
+
+    FILE *src = fopen(source_file, "r");
+    if (!src) {
+        perror("Error opening source file");
+        return 1;
+    }
+
+    FILE *dest = fopen(destination_file, "w");
+    if (!dest) {
+        perror("Error opening destination file");
+        fclose(src);
+        return 1;
+    }
+
+    char line[MAX_LINE_LENGTH];
+   
+    int address = 0;  // Current instruction address
+
+    // First pass: Detect and store labels with their addresses
+    while (fgets(line, sizeof(line), src)) { // Replace input_file with src
+        // Check if the line is a label
+        if (strchr(line, ':')) {
+            char label_name[50];
+            sscanf(line, "%[^:]:", label_name);  // Extract label name
+            add_label(label_name, address);  // Store label with its address
+                     
+        } else {
+            address = address + 4;  // Increment address for each instruction line
+        }
+        }
+       
+        rewind(src);  // Reset file pointer for second pass
+
+    // Second pass: Process instructions and generate machine code
+    address = 0;  // Reset address for second pass
+    while (fgets(line, sizeof(line), src)) { // Replace input_file with src
+        // Skip label lines
+        if (strchr(line, ':') || (line[0] == '#') ) {
+            continue;
+        }
+        // Check if the line is empty or contains only whitespace
+        if (strlen(line) == 0 || strspn(line, " \t\n") == strlen(line)) {
+        continue; // Skip this line
+        }
+        unsigned int machine_code = assemble_instruction(line,address);
+        write_output(dest, machine_code, output_type);
+
+        address = address + 4;  // Increment address
+        }
+
+        fclose(src); // Replace input_file with src
+        fclose(dest); // Replace output_file with dest
+
+    return 0;
+}
+
+// Define structure for labels
+typedef struct {
+    char name[50];
+    int address;
+    } Label;
+// Function to remove trailing newline or whitespace
+void trim_whitespace(char* str) {
+    char* end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char)*end)) {
+        *end = '\0';
+        end--;
+    }
+}
+
+// Array to store labels
+Label labels[100];  // Max 100 labels
+int label_count = 0;  // Label counter
+void write_output(FILE* dest_file, unsigned int machine_code, char output_type) {
+    if (output_type == 'h') {
+        fprintf(dest_file, "0x%08X\n", machine_code);  // Output in hex
+     } else if (output_type == 'b') {
+        for (int i = 31; i >= 0; i--) {
+            fprintf(dest_file, "%d", (machine_code >> i) & 1);  // Output in binary
+        }
+        fprintf(dest_file, "\n");
+     }
+}
+// Function to map register names to binary codes
+int registers(char* reg) {
+    // Convert to lowercase for case-insensitivity
+    for (char *p = reg; *p; ++p) *p = tolower(*p);
+ 
+
+    if (strcmp(reg, "x0") == 0 || strcmp(reg, "zero") == 0) return 0;
+    if (strcmp(reg, "x1") == 0 || strcmp(reg, "ra") == 0 ) return 1;
+    if (strcmp(reg, "x2") == 0 || strcmp(reg, "sp") == 0 ) return 2;
+    if (strcmp(reg, "x3") == 0 || strcmp(reg, "gp") == 0) return 3;
+    if (strcmp(reg, "x4") == 0 || strcmp(reg, "tp") == 0) return 4;
+    if (strcmp(reg, "x5") == 0 || strcmp(reg, "t0") == 0) return 5;
+    if (strcmp(reg, "x6") == 0 || strcmp(reg, "t1") == 0)  return 6;
+    if (strcmp(reg, "x7") == 0 || strcmp(reg, "t2") == 0) return 7;
+    if (strcmp(reg, "x8") == 0 || strcmp(reg, "s0") == 0) return 8;
+    if (strcmp(reg, "x9") == 0 || strcmp(reg, "s1") == 0) return 9;
+    if (strcmp(reg, "x10") == 0 || strcmp(reg, "a0") == 0) return 10;
+    if (strcmp(reg, "x11") == 0 || strcmp(reg, "a1") == 0) return 11;
+    if (strcmp(reg, "x12") == 0 || strcmp(reg, "a2") == 0) return 12;
+    if (strcmp(reg, "x13") == 0 || strcmp(reg, "a3") == 0) return 13;
+    if (strcmp(reg, "x14") == 0 || strcmp(reg, "a4") == 0) return 14;
+    if (strcmp(reg, "x15") == 0 || strcmp(reg, "a5") == 0) return 15;
+    if (strcmp(reg, "x16") == 0 || strcmp(reg, "a6") == 0) return 16;
+    if (strcmp(reg, "x17") == 0 || strcmp(reg, "a7") == 0) return 17;
+    if (strcmp(reg, "x18") == 0 || strcmp(reg, "s2") == 0) return 18;
+    if (strcmp(reg, "x19") == 0 || strcmp(reg, "s3") == 0) return 19;
+    if (strcmp(reg, "x20") == 0 || strcmp(reg, "s4") == 0) return 20;
+    if (strcmp(reg, "x21") == 0 || strcmp(reg, "s5") == 0) return 21;
+    if (strcmp(reg, "x22") == 0 || strcmp(reg, "s6") == 0) return 22;
+    if (strcmp(reg, "x23") == 0 || strcmp(reg, "s7") == 0) return 23;
+    if (strcmp(reg, "x24") == 0 || strcmp(reg, "s8") == 0) return 24;
+    if (strcmp(reg, "x25") == 0 || strcmp(reg, "s9") == 0) return 25;
+    if (strcmp(reg, "x26") == 0 || strcmp(reg, "s10") == 0) return 26;
+    if (strcmp(reg, "x27") == 0 || strcmp(reg, "s11") == 0)  return 27;
+    if (strcmp(reg, "x28") == 0 || strcmp(reg, "t3") == 0) return 28;
+    if (strcmp(reg, "x29") == 0 || strcmp(reg, "t4") == 0) return 29;
+    if (strcmp(reg, "x30") == 0 || strcmp(reg, "t5") == 0) return 30;
+    if (strcmp(reg, "x31") == 0 || strcmp(reg, "t6") == 0) return 31;
+
+    return -1;  // Return -1 for invalid registers
+}
+
+// Function to sign-extend immediate values
+int sign_extend(int imm, int bits) {
+    int mask = 1 << (bits - 1);
+    return (imm & mask) ? (imm | ~((1 << bits) - 1)) : imm;
+}
+// Add a label with its address
+void add_label(char* name, int address) {
+    strcpy(labels[label_count].name, name);
+    labels[label_count].address = address;
+    label_count++;
+}
+int resolve_label(char* name) {
+    trim_whitespace(name);  // Trim any trailing newlines or spaces
+    //printf("Resolving label: '%s'\n", name);  // Print the input label
+
+    for (int i = 0; i < label_count; i++) {
+        //printf("Comparing with stored label: '%s'\n", labels[i].name);  // Debugging output
+
+        if (strcmp(labels[i].name, name) == 0) {
+            //printf("Match found: '%s' at address: 0x%08X\n", labels[i].name, labels[i].address);
+            return labels[i].address;
+        }
+    }
+
+    printf("Error: Undefined label '%s'\n", name);  // Debug if the label is not found
+    return -1;  // Label not found
+}
+
+
+// Function to parse instruction for R-type
+void parse_r_type_instruction(const char* instruction, char* rd, char* rs1, char* rs2) {
+    sscanf(instruction, "%*s %[^,], %[^,], %s", rd, rs1, rs2);
+}
+
+// Function to parse instruction for I-type
+void parse_i_type_instruction(const char* instruction, char* rd, char* rs1, int* imm) {
+    unsigned int imm_str;
+    sscanf(instruction, "%*s %[^,], %u(%[^)])", rd, &imm_str, rs1);
+    *imm = imm_str;  // Extract immediate value
+}
+// Function to parse instruction for I-type
+void parse_ijlar_type_instruction(const char* instruction, char* rd, char* rs1, int* imm) {
+    unsigned int imm_str;
+    sscanf(instruction, "%*s %[^,], %[^,], %u]", rd, rs1, &imm_str);
+    *imm = imm_str;  // Extract immediate value
+}
+
+
+// Function to parse instruction for S-type and B-type
+void parse_s_b_type_instruction(const char* instruction, char* rs1, char* rs2, unsigned int* imm) {
+    unsigned int imm_str;
+    sscanf(instruction, "%*s %[^,], %d(%[^)]", rs1, &imm_str, rs2);
+    *imm = imm_str; // Extract immediate value
+}
+
+// Function to parse instruction for U-type and J-type
+void parse_u_j_type_instruction(const char* instruction, char* rd, int* imm) {
+    unsigned int imm_str;
+    sscanf(instruction, "%*s %[^,],%x", rd, &imm_str);
+    *imm = imm_str;
+}
+
+// Function to assemble R-type instructions
+unsigned int assemble_r_type(const char* instruction, int funct3, int funct7, int opcode) {
+    char rd[10], rs1[10], rs2[10];
+    parse_r_type_instruction(instruction, rd, rs1, rs2);
+    int rd_num = registers(rd);
+    int rs1_num = registers(rs1);
+    int rs2_num = registers(rs2);
+    unsigned int machine_code = ((funct7 & 0x7F) << 25) |
+                                ((rs2_num & 0x1F) << 20) |
+                                ((rs1_num & 0x1F) << 15) |
+                                ((funct3 & 0x7) << 12) |
+                                ((rd_num & 0x1F) << 7) |
+                                (opcode & 0x7F);
+                                                               
+    return machine_code;
+}
+
+// Function to assemble I-type instructions
+unsigned int assemble_ijlar_type(const char* instruction, int funct3, int opcode) {
+    char rd[10], rs1[10];
+    int imm_value;
+
+    parse_ijlar_type_instruction(instruction, rd, rs1, &imm_value);
+
+    int rd_num = registers(rd);
+    int rs1_num = registers(rs1);
+
+    imm_value = sign_extend(imm_value, 12); // Sign-extend to 12 bits
+
+    unsigned int machine_code = (imm_value & 0xFFF) << 20 |
+                                (rs1_num & 0x1F) << 15 |
+                                (funct3 & 0x7) << 12 |
+                                (rd_num & 0x1F) << 7 |
+                                (opcode & 0x7F);
+    return machine_code;
+}
+
+// Function to assemble I-type instructions
+unsigned int assemble_i_type(const char* instruction, int funct3, int opcode) {
+    char rd[10], rs1[10];
+    int imm_value;
+
+    parse_i_type_instruction(instruction, rd, rs1, &imm_value);
+
+    int rd_num = registers(rd);
+    int rs1_num = registers(rs1);
+
+    imm_value = sign_extend(imm_value, 12); // Sign-extend to 12 bits
+
+    unsigned int machine_code = (imm_value & 0xFFF) << 20 |
+                                (rs1_num & 0x1F) << 15 |
+                                (funct3 & 0x7) << 12 |
+                                (rd_num & 0x1F) << 7 |
+                                (opcode & 0x7F);
+    return machine_code;
+}
+// Function to assemble I-type instructions
+unsigned int assemble_ishift_type(const char* instruction, int funct3, int funct7, int opcode) {
+    char rd[10], rs1[10];
+    int imm_value;
+
+    parse_ijlar_type_instruction(instruction, rd, rs1, &imm_value);
+
+    int rd_num = registers(rd);
+    int rs1_num = registers(rs1);
+
+    imm_value = sign_extend(imm_value, 12); // Sign-extend to 12 bits
+
+     
+    unsigned int machine_code = (funct7 & 0x7F) << 25 |
+(imm_value & 0x1F) << 20 |
+                       (rs1_num & 0x1F) << 15 |
+                                (funct3 & 0x7) << 12 |
+                                (rd_num & 0x1F) << 7 |
+                                (opcode & 0x7F);
+    return machine_code;
+}
+
+// Function to assemble S-type instructions
+unsigned int assemble_s_type(const char* instruction, int funct3, int opcode) {
+    char rs1[10], rs2[10];
+    int imm_value;
+
+    parse_s_b_type_instruction(instruction, rs2, rs1, &imm_value);
+
+    int rs1_num = registers(rs1);
+    int rs2_num = registers(rs2);
+    imm_value = sign_extend(imm_value, 12); // Sign-extend to 12 bits
+
+    unsigned int machine_code = ((imm_value & 0xFE0) << 20) |
+                                (rs2_num & 0x1F) << 20 |
+                                (rs1_num & 0x1F) << 15 |
+                                (funct3 & 0x7) << 12 |
+                                ((imm_value & 0x1F) << 7) |
+                                (opcode & 0x7F);
+    return machine_code;
+}
+
+unsigned int assemble_b_type(const char* instruction, int funct3, int opcode, int current_address) {
+    char rs1[10], rs2[10], label[50];
+    int imm_value;
+
+    // Note: Make sure the order of rs1 and rs2 is correctly parsed as per the instruction format
+    sscanf(instruction, "%*s %[^,], %[^,], %[^:]", rs1, rs2, label);
+
+    int label_address = resolve_label(label);
+    if (label_address == -1) {
+        printf("Error: Undefined label %s\n", label);
+        exit(1);
+    }
+
+    // Calculate the offset, which is PC-relative
+    imm_value = label_address - (current_address + 4);
+
+    int rs1_num = registers(rs1);
+    int rs2_num = registers(rs2);
+
+    // Calculate and format the immediate value
+    int imm12 = (imm_value >> 12) & 1;
+    int imm11 = (imm_value >> 11) & 1;
+    int imm10_5 = (imm_value >> 5) & 0x3F;
+    int imm4_1 = (imm_value >> 1) & 0xF;
+
+    unsigned int machine_code = (imm12 << 31) |
+                                (imm10_5 << 25) |
+                                (imm4_1 << 8) |
+                                (imm11 << 7) |
+                                (rs2_num & 0x1F) << 20 |
+                                (rs1_num & 0x1F) << 15 |
+                                (funct3 & 0x7) << 12 |
+                                (opcode & 0x7F);
+
+    return machine_code;
+}
+
+// Function to assemble U-type instructions
+unsigned int assemble_u_type(const char* instruction, int opcode) {
+    char rd[10];
+    unsigned int imm_value;
+    parse_u_j_type_instruction(instruction, rd, &imm_value);
+
+    int rd_num = registers(rd);
+    imm_value = sign_extend(imm_value, 20); // Sign-extend to 20 bits
+    unsigned int machine_code = (imm_value & 0xFFFFF000) << 12 |
+                                (rd_num & 0x1F) << 7 |
+                                (opcode & 0x7F);
+    return machine_code;
+}
+
+unsigned int assemble_jal(const char* instruction, int opcode, int current_address) {
+    char rd[10], label[50];
+    int imm_value;
+
+    sscanf(instruction, "%*s %[^,], %[^:]", rd, label);  // Parsing the instruction
+    int label_address = resolve_label(label);  // Assuming resolve_label function exists and works correctly
+    if (label_address == -1) {
+        printf("Error: Undefined label %s\n", label);
+        exit(1);
+    }
+    // Correctly calculating the offset from the next instruction address (current_address + 4)
+    imm_value = label_address - current_address;
+
+    int rd_num = registers(rd);  // Assuming registers function resolves register names to numbers correctly
+    // Correcting the sign extension to 21 bits
+    if (imm_value >> 20) {  // If the topmost bit (21st bit) is 1
+        imm_value |= 0xFFF00000;  // Sign-extend negative numbers
+    }
+    unsigned int machine_code = ((imm_value >> 20) & 0x1) << 31 |  // imm[20]
+                                ((imm_value >> 1) & 0x3FF) << 21 | // imm[10:1]
+                                ((imm_value >> 11) & 0x1) << 20 |  // imm[11]
+                                ((imm_value >> 12) & 0xFF) << 12 | // imm[19:12]
+                                (rd_num & 0x1F) << 7 |             // rd
+                                opcode;  // opcode for JAL, should be passed or defined as 0x6F if not variable
+                           
+    return machine_code;
+}
+
+
+
+unsigned int assemble_instruction(const char* instruction, int current_address) {
+   
+    char opcode_str[10];
+    char label[50]; // Declare a buffer for the label
+    sscanf(instruction, "%[^:]:", label);
+   
+    sscanf(instruction, "%s", opcode_str);
+   // Check if the instruction has a label
+    if (strchr(instruction, ':') != NULL) {
+        // Handle label definition
+        sscanf(instruction, "%[^:]:", label); // Capture the label name
+        add_label(label, current_address); // Add label with current address
+        return 0; // Return zero or some other value indicating a label
+    }
+
+ // R-type instructions
+if (strcmp(opcode_str, "add") == 0) return assemble_r_type(instruction, 0x0, 0x00, 0x33);   // add rd, rs1, rs2
+if (strcmp(opcode_str, "sub") == 0) return assemble_r_type(instruction, 0x0, 0x20, 0x33);   // sub rd, rs1, rs2
+if (strcmp(opcode_str, "sll") == 0) return assemble_r_type(instruction, 0x1, 0x00, 0x33);   // sll rd, rs1, rs2
+if (strcmp(opcode_str, "slt") == 0) return assemble_r_type(instruction, 0x2, 0x00, 0x33);   // slt rd, rs1, rs2
+if (strcmp(opcode_str, "sltu") == 0) return assemble_r_type(instruction, 0x3, 0x00, 0x33);  // sltu rd, rs1, rs2
+if (strcmp(opcode_str, "xor") == 0) return assemble_r_type(instruction, 0x4, 0x00, 0x33);   // xor rd, rs1, rs2
+if (strcmp(opcode_str, "srl") == 0) return assemble_r_type(instruction, 0x5, 0x00, 0x33);   // srl rd, rs1, rs2
+if (strcmp(opcode_str, "sra") == 0) return assemble_r_type(instruction, 0x5, 0x20, 0x33);   // sra rd, rs1, rs2
+if (strcmp(opcode_str, "or") == 0) return assemble_r_type(instruction, 0x6, 0x00, 0x33);    // or rd, rs1, rs2
+if (strcmp(opcode_str, "and") == 0) return assemble_r_type(instruction, 0x7, 0x00, 0x33);   // and rd, rs1, rs2
+
+// I-type instructions
+if (strcmp(opcode_str, "addi") == 0) return assemble_ijlar_type(instruction, 0x0, 0x13);        // addi rd, rs1, imm
+if (strcmp(opcode_str, "slti") == 0) return assemble_ijlar_type(instruction, 0x2, 0x13);        // slti rd, rs1, imm
+if (strcmp(opcode_str, "sltiu") == 0) return assemble_ijlar_type(instruction, 0x3, 0x13);       // sltiu rd, rs1, imm
+if (strcmp(opcode_str, "xori") == 0) return assemble_ijlar_type(instruction, 0x4, 0x13);        // xori rd, rs1, imm
+if (strcmp(opcode_str, "ori") == 0) return assemble_ijlar_type(instruction, 0x6, 0x13);         // ori rd, rs1, imm
+if (strcmp(opcode_str, "andi") == 0) return assemble_ijlar_type(instruction, 0x7, 0x13);        // andi rd, rs1, imm
+if (strcmp(opcode_str, "slli") == 0) return assemble_ijlar_type(instruction, 0x1, 0x13);        // slli rd, rs1, shamt
+if (strcmp(opcode_str, "srli") == 0) return assemble_ijlar_type(instruction, 0x5, 0x13);        // srli rd, rs1, shamt
+if (strcmp(opcode_str, "srai") == 0) return assemble_ishift_type(instruction, 0x5, 0x20, 0x13);  // srai rd, rs1, shamt
+if (strcmp(opcode_str, "jalr") == 0) return assemble_ijlar_type(instruction, 0x0, 0x67);        // jalr rd, rs1, imm
+if (strcmp(opcode_str, "lb") == 0) return assemble_i_type(instruction, 0x0, 0x03);          // lb rd, imm(rs1)
+if (strcmp(opcode_str, "lh") == 0) return assemble_i_type(instruction, 0x1, 0x03);          // lh rd, imm(rs1)
+if (strcmp(opcode_str, "lw") == 0) return assemble_i_type(instruction, 0x2, 0x03);          // lw rd, imm(rs1)
+if (strcmp(opcode_str, "lbu") == 0) return assemble_i_type(instruction, 0x4, 0x03);         // lbu rd, imm(rs1)
+if (strcmp(opcode_str, "lhu") == 0) return assemble_i_type(instruction, 0x5, 0x03);         // lhu rd, imm(rs1)
+
+// S-type instructions
+if (strcmp(opcode_str, "sb") == 0) return assemble_s_type(instruction, 0x0, 0x23);          // sb rs2, imm(rs1)
+if (strcmp(opcode_str, "sh") == 0) return assemble_s_type(instruction, 0x1, 0x23);          // sh rs2, imm(rs1)
+if (strcmp(opcode_str, "sw") == 0) return assemble_s_type(instruction, 0x2, 0x23);          // sw rs2, imm(rs1)
+
+// B-type instructions
+if (strcmp(opcode_str, "beq") == 0) return assemble_b_type(instruction, 0x0, 0x63, current_address);         // beq rs1, rs2, offset
+if (strcmp(opcode_str, "bne") == 0) return assemble_b_type(instruction, 0x1, 0x63, current_address);         // bne rs1, rs2, offset
+if (strcmp(opcode_str, "blt") == 0) return assemble_b_type(instruction, 0x4, 0x63, current_address);         // blt rs1, rs2, offset
+if (strcmp(opcode_str, "bge") == 0) return assemble_b_type(instruction, 0x5, 0x63, current_address);         // bge rs1, rs2, offset
+if (strcmp(opcode_str, "bltu") == 0) return assemble_b_type(instruction, 0x6, 0x63, current_address);        // bltu rs1, rs2, offset
+if (strcmp(opcode_str, "bgeu") == 0) return assemble_b_type(instruction, 0x7, 0x63, current_address);        // bgeu rs1, rs2, offset
+
+// U-type instructions
+if (strcmp(opcode_str, "lui") == 0) return assemble_u_type(instruction, 0x37);              // lui rd, imm
+if (strcmp(opcode_str, "auipc") == 0) return assemble_u_type(instruction, 0x17);            // auipc rd, imm
+
+// J-type instructions
+if (strcmp(opcode_str, "jal") == 0) return assemble_jal(instruction, 0x6F, current_address);              // jal rd, offset
+
+return -1;  // Invalid instruction
+}
+
